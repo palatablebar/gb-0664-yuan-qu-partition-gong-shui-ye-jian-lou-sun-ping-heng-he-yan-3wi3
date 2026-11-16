@@ -22,14 +22,28 @@ docker compose config --quiet
 - 质量隔离：按原因码定位异常证据，入口 `/quarantine` 与 `GET /api/quarantine`。
 - 阈值复核：复算误差上下界与水量守恒，入口 `/reconcile` 与 `GET /api/reconcile`。
 - 批次归档：幂等重跑与版本复核，入口 `/batches` 与 `GET /api/batches`。
+- 夜间漏损发布：17:00 后发布前晚结论，迟到补录选择重开当班或移交下一班，入口 `/night` 与 `GET /api/night`。
 
 ## 演示
 选择样例后运行，核对业务结论与来源行。异常行保留原值和原因码。复核提交使用当前版本；旧版本返回 409。CSV证据只保留一个归档入口。
+
+夜间漏损页面按夜次对照首版正式结论、当前修订与补录后净水量，逐区标出净水量变化和漏损判断是否改变。补录到达后必须显式选择：
+- 重开当班：新增一条修订，补录并入本期净水量，原修订与原读数保留在证据中。
+- 保留原结论并移交下一班：不新增修订、不改本期净水量，影响登记到下一班的承接区。
+
+同一补录（逻辑读数相同）重试不会新增修订或重复计入。发布写入失败整体回滚，旧版正式结论继续有效。每条记录可通过页面的「追回原读数」查到历次取值。
 
 ## API
 - `POST /api/runs`：JSON 中可指定 `sample`、`text` 与 `params`。
 - `POST /api/runs/{run_id}/review`：提交 `revision`、`decision`。
 - `GET /api/runs/{run_id}/evidence.csv`：来源证据。
+- `GET /api/night?night=YYYY-MM-DD`：夜次详情，含正式结论、补录前后净水量与采用依据。
+- `POST /api/night/{night}/publish`：发布前晚结论。
+- `POST /api/night/{night}/backfill`：登记迟到补录，JSON 含 `text`。
+- `POST /api/night/{night}/backfill/{key}/reopen`：重开当班。
+- `POST /api/night/{night}/backfill/{key}/carry`：保留原结论并移交下一班。
+- `GET /api/night/{night}/readings/{record_id}`：追回某记录历次取值。
+- `GET /api/night/{night}/evidence.csv`：夜次证据，含被替换的原读数。
 - `GET /docs`：接口定义。
 
 ## 数据保存

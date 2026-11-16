@@ -1,0 +1,174 @@
+{% extends 'base.html' %}
+{% block body %}
+<div class="work">
+  <header class="topbar"><h1>夜间漏损发布</h1><span class="run-id">{{ data.night_id }} · {{ data.window.start }} → {{ data.window.end }}</span><a class="btn" href="/api/night/{{ data.night_id }}/evidence.csv">导出夜次证据</a></header>
+  <main class="content">
+    <div class="kpis">
+      <div class="kpi"><small>夜次</small><strong>{{ data.night_id }}</strong></div>
+      <div class="kpi"><small>发布时点</small><strong class="small-num">{{ data.due_at[11:16] }}</strong></div>
+      <div class="kpi"><small>正式版本</small><strong>{{ data.latest_revision or '—' }}</strong></div>
+      <div class="kpi"><small>待处置补录</small><strong class="{{ 'bad' if data.pending_count else '' }}">{{ data.pending_count }}</strong></div>
+      <div class="kpi"><small>当前净水量</small><strong>{{ data.current_totals.net }}</strong></div>
+      <div class="kpi"><small>补录后净水量</small><strong class="{{ 'bad' if data.preview_totals.net != data.current_totals.net else '' }}">{{ data.preview_totals.net }}</strong></div>
+    </div>
+
+    <div class="comparison-strip night-strip status-{{ data.status }}">
+      <span class="status-pill status-{{ data.status }}">{{ data.status_label }}</span>
+      <span>夜次 {{ data.night_id }}</span>
+      <span>阈值 {{ data.threshold }} m³</span>
+      <span>{{ '已发布正式结论' if data.published else '当班尚未发布' }}</span>
+      {% if data.pending_count %}<span class="bad">有 {{ data.pending_count }} 条迟到补录待选择：重开当班 或 保留原结论并移交下一班</span>{% endif %}
+      {% if data.carry_in %}<span class="warn">承接前班移交 {{ data.carry_in|length }} 条</span>{% endif %}
+    </div>
+
+    <div class="workspace-grid night-grid">
+      <section class="panel primary-panel">
+        <div class="panel__head"><h2>同一晚对照：正式结论 / 补录前后净水量 / 采用依据</h2><span>m³</span></div>
+        <div class="panel__body flush">
+          <div class="table-scroll"><table class="ledger night-compare"><thead><tr>
+            <th>分区</th><th>首版净水量</th><th>首版结论</th><th>当前净水量</th><th>当前残差</th><th>当前结论</th>
+            <th>补录后净水量</th><th>变化</th><th>补录后残差</th><th>补录后结论</th><th>判断</th><th>涉及记录</th>
+          </tr></thead><tbody>
+          {% for row in data.comparison %}
+            <tr class="{{ 'changed' if row.status_changed or (row.net_delta and row.net_delta not in ['0.000','-0.000']) else '' }}">
+              <td><b>{{ row.zone }}</b></td>
+              <td class="num">{{ row.first_net if row.first_net is not none else '—' }}</td>
+              <td>{{ row.first_status }}</td>
+              <td class="num">{{ row.current_net if row.current_net is not none else '—' }}</td>
+              <td class="num">{{ row.current_residual if row.current_residual is not none else '—' }}</td>
+              <td>{{ row.current_status }}</td>
+              <td class="num">{{ row.preview_net }}</td>
+              <td class="num {{ 'bad' if row.net_delta and row.net_delta not in ['0.000','-0.000'] else '' }}">{{ row.net_delta if row.net_delta is not none else '—' }}</td>
+              <td class="num">{{ row.preview_residual }}</td>
+              <td class="{{ 'bad' if row.status_changed else '' }}">{{ row.preview_status }}</td>
+              <td>{% if row.status_changed %}<span class="tag bad">判断改变</span>{% elif row.net_delta and row.net_delta not in ['0.000','-0.000'] %}<span class="tag warn">水量改变</span>{% else %}<span class="tag">不变</span>{% endif %}</td>
+              <td class="mono small">{% for rid in row.records %}<a href="#reading-{{ rid }}">{{ rid }}</a>{{ '、' if not loop.last }}{% else %}—{% endfor %}</td>
+            </tr>
+          {% else %}
+            <tr><td colspan="12">该夜次没有可对照的分区数据。</td></tr>
+          {% endfor %}
+          </tbody></table></div>
+        </div>
+      </section>
+
+      <section class="panel controls">
+        <div class="panel__head"><h2>发布与补录</h2><span>{{ data.rule_version }}</span></div>
+        <div class="panel__body">
+          {% if not data.published %}
+          <p class="hint">发布后生成首版正式结论。发布前已登记的补录会一并采纳，并写入采用依据；发布时点 {{ data.due_at }}。</p>
+          <button class="btn primary" id="publish-button" data-night="{{ data.night_id }}">发布 {{ data.night_id }} 结论</button>
+          {% else %}
+          <p class="hint">正式结论已发布（修订 {{ data.latest_revision }}，{{ data.official.kind_label }}）。重复发布不会新增修订。</p>
+          {% endif %}
+          <form id="backfill-form" data-night="{{ data.night_id }}">
+            <label>迟到补录 CSV<textarea name="text" rows="6" required placeholder="record_id,at,meter,from_zone,to_zone,kind,value,unit,error_pct"></textarea></label>
+            <button class="btn" type="submit">登记补录</button>
+          </form>
+          <form id="reading-form" data-night="{{ data.night_id }}">
+            <label>追回原读数：记录号<input name="record_id" placeholder="如 06-AB" required></label>
+            <button class="btn" type="submit">查找历次取值</button>
+          </form>
+          <div id="reading-result" class="reading-result" aria-live="polite"></div>
+          <p id="night-feedback" role="status" aria-live="polite"></p>
+        </div>
+      </section>
+
+      <section class="panel">
+        <div class="panel__head"><h2>迟到补录与影响</h2><span>{{ data.backfills|length }} 条</span></div>
+        <div class="panel__body">
+          {% for item in data.backfills %}
+          <article class="backfill-card state-{{ item.state }}" id="backfill-{{ item.key }}">
+            <header>
+              <code>{{ item.key[:12] }}</code>
+              <span class="tag {{ {'pending':'warn','applied':'pass','carried':'muted'}.get(item.state,'') }}">{{ {'pending':'待处置','applied':'已并入','carried':'已移交'}.get(item.state, item.state) }}</span>
+              <time>{{ item.received_label }}</time>
+            </header>
+            <div class="table-scroll"><table class="ledger"><thead><tr><th>记录</th><th>表号</th><th>分区</th><th>类型</th><th>原值 / m³</th><th>补录值 / m³</th><th>来源行</th><th>处置</th></tr></thead><tbody>
+              {% for row in item.record_rows %}
+              {% set previous = (item.replaces | selectattr('record_id','equalto',row.record_id) | list | first) %}
+              <tr><td>{{ row.record_id }}</td><td>{{ row.meter }}</td><td>{{ row.from_zone }} → {{ row.to_zone }}</td><td>{{ row.kind }}</td><td class="num">{{ previous.value_m3 if previous else '—' }}</td><td class="num {{ 'bad' if previous and previous.value_m3 != row.value_m3 else '' }}">{{ row.value_m3 }}</td><td class="num">{{ row.line }}</td><td>{{ '替换原读数' if previous else '新增读数' }}</td></tr>
+              {% endfor %}
+            </tbody></table></div>
+            <div class="impact">
+              <p class="impact-label">本条{% if item.state == 'pending' %}若并入{% else %}并入时{% endif %}的影响（以其余{% if item.state == 'pending' %}已采纳读数{% else %}已采纳补录{% endif %}为基线）</p>
+              {% for change in item.impact %}
+              <div class="diff-row">
+                <b>{{ change.zone }}</b>
+                <span>净水量 {{ change.before_net }} → {{ change.after_net }} m³</span>
+                <span>残差 {{ change.before_residual }} → {{ change.after_residual }}</span>
+                <span class="{{ 'bad' if change.status_changed else '' }}">{{ change.before_status }} → {{ change.after_status }}</span>
+              </div>
+              {% else %}
+              <div class="diff-row"><span>该补录不改变分区净水量与结论。</span></div>
+              {% endfor %}
+            </div>
+            {% if item.state == 'pending' %}
+            <div class="decision">
+              <p class="hint">{% if item.impact|selectattr('status_changed')|list %}该补录改变漏损判断，建议重开当班结论。{% else %}该补录只移动水量、不改变漏损判断，可保留原结论并移交下一班。{% endif %}</p>
+              <form class="decision-form" data-url="/api/night/{{ data.night_id }}/backfill/{{ item.key }}/reopen" data-confirm="重开当班结论会新增修订并改变本班净水量，继续？">
+                <button class="btn primary" type="submit">重开当班</button>
+              </form>
+              <form class="decision-form" data-url="/api/night/{{ data.night_id }}/backfill/{{ item.key }}/carry" data-payload="note" data-confirm="保留原结论并把影响移交下一班，继续？">
+                <input name="note" placeholder="移交给 {{ data.night_id }} 的下一班，备注" aria-label="移交备注">
+                <button class="btn" type="submit">保留原结论并移交下一班</button>
+              </form>
+            </div>
+            {% endif %}
+          </article>
+          {% else %}
+          <p class="hint">暂无补录。补录到达后会在此列出，并同时给出重开与移交的影响。</p>
+          {% endfor %}
+        </div>
+      </section>
+
+      <section class="panel">
+        <div class="panel__head"><h2>正式结论与采用依据</h2><span>{{ data.official.kind_label if data.official else '未发布' }}</span></div>
+        <div class="panel__body">
+          {% if data.official %}
+          <dl class="basis">
+            <dt>当前修订</dt><dd>{{ data.official.revision }} · {{ data.official.created_label }}</dd>
+            <dt>依据摘要</dt><dd class="hash">{{ data.official.basis_sha }}</dd>
+            <dt>运行摘要</dt><dd class="hash">{{ data.official.basis.labels.run }}</dd>
+            <dt>阈值 / 规则版本</dt><dd>{{ data.official.basis.labels.threshold }} m³ · {{ data.official.basis.labels.rule }}</dd>
+            <dt>采纳的补录</dt><dd class="mono small">{% for key in data.official.basis.labels.adopted %}{{ key[:12] }}{{ '、' if not loop.last }}{% else %}无{% endfor %}</dd>
+            <dt>前班移交</dt><dd class="mono small">{% for key in data.official.basis.labels.carried_in %}{{ key[:12] }}{{ '、' if not loop.last }}{% else %}无{% endfor %}</dd>
+          </dl>
+          <div class="table-scroll"><table class="ledger"><thead><tr><th>版本</th><th>类别</th><th>净水量</th><th>残差</th><th>采纳补录</th><th>依据摘要</th><th>时间</th></tr></thead><tbody>
+            {% for item in data.history %}<tr class="{{ 'current' if loop.last else '' }}"><td class="num">{{ item.revision }}</td><td>{{ item.kind_label }}</td><td class="num">{{ item.totals.net }}</td><td class="num">{{ item.totals.residual }}</td><td class="mono small">{% for key in item.adopted %}{{ key[:8] }}{{ '、' if not loop.last }}{% else %}—{% endfor %}</td><td class="mono small">{{ item.basis_sha[:12] }}</td><td>{{ item.created_label }}</td></tr>{% endfor %}
+          </tbody></table></div>
+          {% else %}
+          <p class="hint">尚未发布。发布后这里显示依据摘要、阈值与规则版本，并保留每次修订。</p>
+          {% endif %}
+        </div>
+      </section>
+
+      <section class="panel">
+        <div class="panel__head"><h2>夜次移交</h2><span>同班次责任</span></div>
+        <div class="panel__body">
+          <h3>本班移交下一班</h3>
+          {% for item in data.carry_out %}
+          <div class="diff-row"><b>{{ item.backfill_key[:12] }}</b><span>→ {{ item.to_night }}</span><span>{{ item.note or '未备注' }}</span>{% if item.impact %}<span>{{ item.impact|length }} 个分区受影响</span>{% endif %}</div>
+          {% else %}<p class="hint">无移交记录。</p>{% endfor %}
+          <h3>承接前班移交</h3>
+          {% for item in data.carry_in %}
+          <div class="diff-row"><b>{{ item.backfill_key[:12] }}</b><span>来自 {{ item.from_night }}</span><span>{{ item.note or '未备注' }}</span>{% if item.impact %}<span>{{ item.impact|length }} 个分区受影响</span>{% endif %}</div>
+          {% else %}<p class="hint">无前班移交。</p>{% endfor %}
+        </div>
+      </section>
+
+      <section class="panel">
+        <div class="panel__head"><h2>其他夜次</h2><span>{{ data.summaries|length }}</span></div>
+        <div class="panel__body flush">
+          <div class="table-scroll"><table class="ledger"><thead><tr><th>夜次</th><th>版本</th><th>状态</th><th>待处置</th><th>净水量</th></tr></thead><tbody>
+          {% for item in data.summaries %}
+            <tr><td><a href="/night?night={{ item.night_id }}">{{ item.night_id }}</a></td><td class="num">{{ item.revision or '—' }}</td><td>{{ {'pending':'待处置','reopened':'已重开','carried':'已移交','published':'已发布','draft':'未发布'}.get(item.status,item.status) }}</td><td class="num">{{ item.pending }}</td><td class="num">{{ item.totals.net if item.totals else '—' }}</td></tr>
+          {% endfor %}
+          </tbody></table></div>
+        </div>
+      </section>
+    </div>
+  </main>
+  <footer class="statusbar"><span>计量版本 {{ version }}</span><span>{{ data.night_id }} · 17:00 发布前晚结论</span><span><a href="/docs">API</a> · <a href="/health">服务状态</a></span></footer>
+</div>
+<script src="/static/night.js" defer></script>
+{% endblock %}
